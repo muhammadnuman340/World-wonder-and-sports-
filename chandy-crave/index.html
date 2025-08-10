@@ -14,6 +14,8 @@
     <header class="app__header">
       <h1 class="title">Chandy Crave</h1>
       <div class="stats">
+        <div class="stat"><span class="stat__label">Level</span><span id="level" class="stat__value">1</span></div>
+        <div class="stat"><span class="stat__label">Target</span><span id="target" class="stat__value">0</span></div>
         <div class="stat"><span class="stat__label">Score</span><span id="score" class="stat__value">0</span></div>
         <div class="stat"><span class="stat__label">Moves</span><span id="moves" class="stat__value">0</span></div>
         <div class="stat"><span class="stat__label">Best</span><span id="best" class="stat__value">0</span></div>
@@ -44,6 +46,16 @@
       <p class="overlay__score">Final score: <span id="finalScore">0</span></p>
       <div class="overlay__actions">
         <button id="playAgainBtn" class="btn">Play Again</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="levelOverlay" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="levelTitle">
+    <div class="overlay__card">
+      <h2 id="levelTitle">Level Complete!</h2>
+      <p>Great job! Ready for the next level?</p>
+      <div class="overlay__actions">
+        <button id="nextLevelBtn" class="btn">Next Level</button>
       </div>
     </div>
   </div>

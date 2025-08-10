@@ -10,6 +10,8 @@ const CASCADE_BONUS_PER_STEP = 0.25; // +25% per cascade step beyond the first
 const HAMMER_STARTING_COUNT = 3;
 const HINT_HIGHLIGHT_MS = 1200;
 const SWIPE_THRESHOLD_PX = 18;
+const LEVEL_BASE_TARGET = 600;
+const LEVEL_TARGET_STEP = 350;
 
 // Emoji tile set - can be swapped for images if desired
 const TILE_EMOJIS = ["🍒", "🍋", "🍇", "🍏", "🍊", "🍬"];
@@ -30,6 +32,9 @@ const state = {
   history: [], // stack of previous states for undo
   soundOn: false,
   touchStart: null, // {row,col,x,y}
+  level: 1,
+  targetScore: LEVEL_BASE_TARGET,
+  lastSwap: null, // { a, b } for the last swap that created a special
 };
 
 /** DOM elements */
@@ -49,6 +54,11 @@ const hammerBtn = document.getElementById("hammerBtn");
 const hammerCountEl = document.getElementById("hammerCount");
 const undoBtn = document.getElementById("undoBtn");
 const soundBtn = document.getElementById("soundBtn");
+// new stats and overlays
+const levelEl = document.getElementById("level");
+const targetEl = document.getElementById("target");
+const levelOverlayEl = document.getElementById("levelOverlay");
+const nextLevelBtn = document.getElementById("nextLevelBtn");
 
 /** Utilities */
 const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
@@ -91,6 +101,8 @@ function updateHud() {
   scoreEl.textContent = String(state.score);
   movesEl.textContent = String(state.movesRemaining);
   bestEl.textContent = String(getBestScore());
+  if (levelEl) levelEl.textContent = String(state.level);
+  if (targetEl) targetEl.textContent = String(state.targetScore);
   if (hammerCountEl) hammerCountEl.textContent = `x${state.hammerCount}`;
   if (soundBtn) soundBtn.textContent = `Sound: ${state.soundOn ? 'On' : 'Off'}`;
   if (soundBtn) soundBtn.setAttribute('aria-pressed', String(state.soundOn));
@@ -131,31 +143,46 @@ function areAdjacent(a, b) {
   return (dr === 1 && dc === 0) || (dr === 0 && dc === 1);
 }
 
-function randomTileIndex() {
-  return Math.floor(Math.random() * TILE_EMOJIS.length);
+// Special pieces encoding: store objects in grid instead of plain index when special
+// { type: 'tile', kind: number } regular
+// { type: 'row'|'col'|'bomb', kind: number } specials
+
+function isObjectTile(cell) {
+  return cell && typeof cell === 'object';
 }
 
-function tileAt(row, col) {
-  return state.grid[row][col];
+function getKind(cell) {
+  if (cell === null) return null;
+  if (isObjectTile(cell)) return cell.kind;
+  return cell;
 }
 
-function setTile(row, col, value) {
-  state.grid[row][col] = value;
+function setNormalTile(row, col, kind) {
+  state.grid[row][col] = { type: 'tile', kind };
+}
+
+function setSpecial(row, col, specialType, kind) {
+  state.grid[row][col] = { type: specialType, kind };
 }
 
 function renderBoard() {
-  // Render the board from state
   boardEl.innerHTML = "";
   for (let row = 0; row < BOARD_SIZE; row++) {
     for (let col = 0; col < BOARD_SIZE; col++) {
-      const tileIndex = tileAt(row, col);
+      const cell = tileAt(row, col);
       const tileEl = document.createElement("button");
       tileEl.className = "tile";
       tileEl.setAttribute("role", "gridcell");
       tileEl.setAttribute("aria-label", `Tile ${row + 1}, ${col + 1}`);
       tileEl.dataset.row = String(row);
       tileEl.dataset.col = String(col);
-      tileEl.textContent = tileIndex !== null ? TILE_EMOJIS[tileIndex] : "";
+      const kind = getKind(cell);
+      const emoji = kind !== null ? TILE_EMOJIS[kind] : "";
+      tileEl.textContent = emoji;
+      if (isObjectTile(cell) && cell.type !== 'tile') {
+        // add a subtle marker for specials
+        tileEl.textContent += cell.type === 'row' ? '⟷' : cell.type === 'col' ? '↕' : '💥';
+      }
       tileEl.addEventListener("click", onTileClick);
       if (state.selected && state.selected.row === row && state.selected.col === col) {
         tileEl.classList.add("selected");
@@ -165,6 +192,10 @@ function renderBoard() {
   }
 }
 
+function randomTileIndex() {
+  return Math.floor(Math.random() * TILE_EMOJIS.length);
+}
+
 function generateInitialBoard() {
   state.grid = createEmptyGrid();
   for (let row = 0; row < BOARD_SIZE; row++) {
@@ -172,12 +203,11 @@ function generateInitialBoard() {
       let tile;
       do {
         tile = randomTileIndex();
-        setTile(row, col, tile);
+        setNormalTile(row, col, tile);
       } while (createsImmediateMatch(row, col));
     }
   }
 
-  // Ensure at least one possible move exists; reshuffle if none
   let safety = 0;
   while (!hasAnyValidMove() && safety < 20) {
     shuffleBoard();
@@ -186,14 +216,14 @@ function generateInitialBoard() {
 }
 
 function createsImmediateMatch(row, col) {
-  const current = tileAt(row, col);
+  const current = getKind(tileAt(row, col));
   // Check left and left-left
   if (inBounds(row, col - 1) && inBounds(row, col - 2)) {
-    if (tileAt(row, col - 1) === current && tileAt(row, col - 2) === current) return true;
+    if (getKind(tileAt(row, col - 1)) === current && getKind(tileAt(row, col - 2)) === current) return true;
   }
   // Check up and up-up
   if (inBounds(row - 1, col) && inBounds(row - 2, col)) {
-    if (tileAt(row - 1, col) === current && tileAt(row - 2, col) === current) return true;
+    if (getKind(tileAt(row - 1, col)) === current && getKind(tileAt(row - 2, col)) === current) return true;
   }
   return false;
 }
@@ -275,29 +305,31 @@ async function attemptSwap(a, b) {
 
   // snapshot before mutating for undo
   pushHistory();
+  state.lastSwap = { a, b };
 
   swapInGrid(a, b);
   renderBoard();
 
   const matched = findAllMatches();
   if (matched.size === 0) {
-    // invalid swap; revert after a small delay
     await sleep(180);
     swapInGrid(a, b);
-    state.history.pop(); // discard snapshot for invalid move
+    state.history.pop();
     playBeep("bad");
     state.selected = null;
+    state.lastSwap = null;
     state.isResolving = false;
     renderBoard();
     return;
   }
 
-  // Valid swap: consume a move and resolve cascades
   state.movesRemaining = Math.max(0, state.movesRemaining - 1);
   state.selected = null;
   updateHud();
   playBeep("ok");
   await resolveMatchesCascade(matched);
+
+  state.lastSwap = null;
 
   if (state.movesRemaining === 0) {
     await endGame();
@@ -319,18 +351,20 @@ function swapInGrid(a, b) {
 }
 
 function findAllMatches() {
-  const matched = new Set(); // store as "r,c"
+  const matched = new Set();
+  const lines = [];
 
   // Horizontal
   for (let row = 0; row < BOARD_SIZE; row++) {
     let runStart = 0;
     for (let col = 1; col <= BOARD_SIZE; col++) {
-      const current = col < BOARD_SIZE ? tileAt(row, col) : null;
-      const prev = tileAt(row, col - 1);
+      const current = col < BOARD_SIZE ? getKind(tileAt(row, col)) : null;
+      const prev = getKind(tileAt(row, col - 1));
       if (col < BOARD_SIZE && current === prev) continue;
       const runLength = col - runStart;
       if (prev !== null && runLength >= 3) {
         for (let c = runStart; c < col; c++) matched.add(`${row},${c}`);
+        lines.push({ dir: 'row', row, start: runStart, end: col - 1, length: runLength, kind: prev });
       }
       runStart = col;
     }
@@ -340,18 +374,54 @@ function findAllMatches() {
   for (let col = 0; col < BOARD_SIZE; col++) {
     let runStart = 0;
     for (let row = 1; row <= BOARD_SIZE; row++) {
-      const current = row < BOARD_SIZE ? tileAt(row, col) : null;
-      const prev = tileAt(row - 1, col);
+      const current = row < BOARD_SIZE ? getKind(tileAt(row, col)) : null;
+      const prev = getKind(tileAt(row - 1, col));
       if (row < BOARD_SIZE && current === prev) continue;
       const runLength = row - runStart;
       if (prev !== null && runLength >= 3) {
         for (let r = runStart; r < row; r++) matched.add(`${r},${col}`);
+        lines.push({ dir: 'col', col, start: runStart, end: row - 1, length: runLength, kind: prev });
       }
       runStart = row;
     }
   }
 
+  // Create specials for 4 or 5 matches: place at the last swapped position if known; otherwise at an end
+  if (state.lastSwap) {
+    for (const line of lines) {
+      if (line.length === 4) {
+        const { a, b } = state.lastSwap;
+        const target = choosePlacementForLine(line, a, b);
+        if (target) {
+          matched.delete(`${target.row},${target.col}`); // will replace with special, not clear it
+          setSpecial(target.row, target.col, line.dir === 'row' ? 'row' : 'col', line.kind);
+        }
+      } else if (line.length >= 5) {
+        const { a, b } = state.lastSwap;
+        const target = choosePlacementForLine(line, a, b);
+        if (target) {
+          matched.delete(`${target.row},${target.col}`);
+          setSpecial(target.row, target.col, 'bomb', line.kind);
+        }
+      }
+    }
+  }
+
   return matched;
+}
+
+function choosePlacementForLine(line, a, b) {
+  // choose the cell from the line that matches either swap endpoint; else fallback
+  const cells = [];
+  if (line.dir === 'row') {
+    for (let c = line.start; c <= line.end; c++) cells.push({ row: line.row, col: c });
+  } else {
+    for (let r = line.start; r <= line.end; r++) cells.push({ row: r, col: line.col });
+  }
+  for (const cell of cells) {
+    if ((cell.row === a.row && cell.col === a.col) || (cell.row === b.row && cell.col === b.col)) return cell;
+  }
+  return cells[0];
 }
 
 async function resolveMatchesCascade(initialMatched) {
@@ -362,6 +432,8 @@ async function resolveMatchesCascade(initialMatched) {
     state.cascadeDepth++;
 
     await animateClears(matched);
+    // Expand matched with special effects
+    expandSpecialEffects(matched);
     applyClears(matched);
 
     const gained = computeScoreGain(matched.size, state.cascadeDepth);
@@ -373,14 +445,58 @@ async function resolveMatchesCascade(initialMatched) {
     refillBoard();
     renderBoard();
 
-    // Let tiles "settle"
     await sleep(120);
 
     matched = findAllMatches();
     playBeep("clear");
+
+    // Level progression
+    if (state.score >= state.targetScore) {
+      await levelComplete();
+      break;
+    }
   }
 
   statusEl.textContent = state.cascadeDepth > 1 ? `Cascade x${state.cascadeDepth}!` : "";
+}
+
+function expandSpecialEffects(matched) {
+  const additions = new Set();
+  for (const key of [...matched]) {
+    const [r, c] = key.split(',').map(Number);
+    const cell = tileAt(r, c);
+    if (isObjectTile(cell) && cell.type !== 'tile') {
+      if (cell.type === 'row') {
+        for (let cc = 0; cc < BOARD_SIZE; cc++) additions.add(`${r},${cc}`);
+      } else if (cell.type === 'col') {
+        for (let rr = 0; rr < BOARD_SIZE; rr++) additions.add(`${rr},${c}`);
+      } else if (cell.type === 'bomb') {
+        for (let rr = r - 1; rr <= r + 1; rr++) {
+          for (let cc = c - 1; cc <= c + 1; cc++) {
+            if (inBounds(rr, cc)) additions.add(`${rr},${cc}`);
+          }
+        }
+      }
+    }
+  }
+  for (const add of additions) matched.add(add);
+}
+
+async function levelComplete() {
+  levelOverlayEl.classList.remove('hidden');
+}
+
+function startNextLevel() {
+  levelOverlayEl.classList.add('hidden');
+  state.level += 1;
+  state.targetScore = LEVEL_BASE_TARGET + (state.level - 1) * LEVEL_TARGET_STEP;
+  state.movesRemaining = INITIAL_MOVES;
+  state.hammerCount = HAMMER_STARTING_COUNT;
+  state.selected = null;
+  state.history = [];
+  generateInitialBoard();
+  updateHud();
+  renderBoard();
 }
 
 function computeScoreGain(numTiles, cascadeDepth) {
@@ -494,6 +610,8 @@ function resetGame() {
   state.hammerCount = HAMMER_STARTING_COUNT;
   state.isHammerMode = false;
   state.history = [];
+  state.level = 1;
+  state.targetScore = LEVEL_BASE_TARGET;
   boardEl.classList.remove('hammer-mode');
   generateInitialBoard();
   updateHud();
@@ -543,6 +661,7 @@ function wireUi() {
     if (state.soundOn) playBeep('ok');
     updateHud();
   });
+  nextLevelBtn.addEventListener('click', startNextLevel);
 
   // touch swipe
   boardEl.addEventListener('touchstart', onTouchStart, { passive: true });
