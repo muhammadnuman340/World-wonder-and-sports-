@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Match-3 (Candy Crush-like)</title>
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <h1 class="title">Match‑3</h1>
+        <div class="stats">
+          <div class="stat"><span class="label">Score</span><span id="score" class="value">0</span></div>
+          <div class="stat"><span class="label">Moves</span><span id="moves" class="value">30</span></div>
+          <div class="stat"><span class="label">Best</span><span id="best" class="value">0</span></div>
+        </div>
+        <div class="actions">
+          <button id="restartBtn" class="btn">Restart</button>
+        </div>
+      </header>
+
+      <main id="game">
+        <div id="board" class="board" aria-label="Match-3 board" role="grid" aria-rowcount="8" aria-colcount="8"></div>
+        <div id="overlay" class="overlay hidden" aria-live="polite" aria-atomic="true">
+          <div class="overlay-card">
+            <h2 id="overlayTitle">Game Over</h2>
+            <p id="overlaySubtitle">Out of moves!</p>
+            <div class="overlay-stats">
+              <div><span class="label">Score</span><span id="finalScore" class="value">0</span></div>
+              <div><span class="label">Best</span><span id="finalBest" class="value">0</span></div>
+            </div>
+            <button id="overlayRestart" class="btn btn-primary">Play again</button>
+          </div>
+        </div>
+      </main>
+
+      <footer class="footer">
+        <span>Built for you — enjoy!</span>
+      </footer>
+    </div>
+
+    <script defer src="./main.js"></script>
+  </body>
+</html>
