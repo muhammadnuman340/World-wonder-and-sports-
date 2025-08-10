@@ -7,6 +7,9 @@ const BOARD_SIZE = 8;
 const INITIAL_MOVES = 24;
 const SCORE_PER_TILE = 10;
 const CASCADE_BONUS_PER_STEP = 0.25; // +25% per cascade step beyond the first
+const HAMMER_STARTING_COUNT = 3;
+const HINT_HIGHLIGHT_MS = 1200;
+const SWIPE_THRESHOLD_PX = 18;
 
 // Emoji tile set - can be swapped for images if desired
 const TILE_EMOJIS = ["🍒", "🍋", "🍇", "🍏", "🍊", "🍬"];
@@ -21,6 +24,12 @@ const state = {
   movesRemaining: INITIAL_MOVES,
   score: 0,
   cascadeDepth: 0,
+  // extended state
+  hammerCount: HAMMER_STARTING_COUNT,
+  isHammerMode: false,
+  history: [], // stack of previous states for undo
+  soundOn: false,
+  touchStart: null, // {row,col,x,y}
 };
 
 /** DOM elements */
@@ -34,9 +43,40 @@ const finalScoreEl = document.getElementById("finalScore");
 const newGameBtn = document.getElementById("newGameBtn");
 const playAgainBtn = document.getElementById("playAgainBtn");
 const shuffleBtn = document.getElementById("shuffleBtn");
+// new controls
+const hintBtn = document.getElementById("hintBtn");
+const hammerBtn = document.getElementById("hammerBtn");
+const hammerCountEl = document.getElementById("hammerCount");
+const undoBtn = document.getElementById("undoBtn");
+const soundBtn = document.getElementById("soundBtn");
 
 /** Utilities */
 const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+
+let audioCtx = null;
+function ensureAudio() {
+  if (!audioCtx) {
+    try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch {}
+  }
+}
+function playBeep(type = "ok") {
+  if (!state.soundOn) return;
+  ensureAudio();
+  if (!audioCtx) return;
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.type = "sine";
+  const now = audioCtx.currentTime;
+  const freq = type === "ok" ? 680 : type === "bad" ? 220 : type === "clear" ? 520 : 440;
+  o.frequency.setValueAtTime(freq, now);
+  g.gain.setValueAtTime(0.001, now);
+  g.gain.exponentialRampToValueAtTime(0.15, now + 0.02);
+  g.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+  o.connect(g);
+  g.connect(audioCtx.destination);
+  o.start(now);
+  o.stop(now + 0.2);
+}
 
 function getBestScore() {
   const value = localStorage.getItem("chandy_best_score");
@@ -51,6 +91,29 @@ function updateHud() {
   scoreEl.textContent = String(state.score);
   movesEl.textContent = String(state.movesRemaining);
   bestEl.textContent = String(getBestScore());
+  if (hammerCountEl) hammerCountEl.textContent = `x${state.hammerCount}`;
+  if (soundBtn) soundBtn.textContent = `Sound: ${state.soundOn ? 'On' : 'Off'}`;
+  if (soundBtn) soundBtn.setAttribute('aria-pressed', String(state.soundOn));
+}
+
+function deepCloneGrid(grid) {
+  return grid.map((row) => row.slice());
+}
+
+function pushHistory() {
+  // Keep last few states to bound memory
+  const snapshot = {
+    grid: deepCloneGrid(state.grid),
+    movesRemaining: state.movesRemaining,
+    score: state.score,
+    hammerCount: state.hammerCount,
+  };
+  state.history.push(snapshot);
+  if (state.history.length > 10) state.history.shift();
+}
+
+function popHistory() {
+  return state.history.pop() || null;
 }
 
 function createEmptyGrid() {
@@ -142,6 +205,11 @@ function onTileClick(event) {
   const col = Number(target.dataset.col);
   const current = { row, col };
 
+  if (state.isHammerMode) {
+    useHammerOn(current);
+    return;
+  }
+
   if (!state.selected) {
     state.selected = current;
   } else if (state.selected.row === row && state.selected.col === col) {
@@ -154,9 +222,59 @@ function onTileClick(event) {
   renderBoard();
 }
 
+async function useHammerOn(cell) {
+  if (state.hammerCount <= 0) {
+    statusEl.textContent = "No hammers left";
+    await sleep(300);
+    statusEl.textContent = "";
+    state.isHammerMode = false;
+    boardEl.classList.remove("hammer-mode");
+    return;
+  }
+  state.isResolving = true;
+  state.isHammerMode = false;
+  boardEl.classList.remove("hammer-mode");
+
+  pushHistory();
+
+  // Clear the chosen tile
+  setTile(cell.row, cell.col, null);
+  renderBoard();
+  playBeep("clear");
+  await sleep(120);
+
+  // Apply gravity and refill and resolve any resulting matches
+  applyGravity();
+  refillBoard();
+  renderBoard();
+  await sleep(100);
+
+  let matched = findAllMatches();
+  while (matched.size > 0) {
+    await animateClears(matched);
+    applyClears(matched);
+    const gained = computeScoreGain(matched.size, 1);
+    state.score += gained;
+    if (state.score > getBestScore()) setBestScore(state.score);
+    updateHud();
+    applyGravity();
+    refillBoard();
+    renderBoard();
+    await sleep(100);
+    matched = findAllMatches();
+  }
+
+  state.hammerCount -= 1;
+  updateHud();
+  state.isResolving = false;
+}
+
 async function attemptSwap(a, b) {
   if (state.isResolving) return;
   state.isResolving = true;
+
+  // snapshot before mutating for undo
+  pushHistory();
 
   swapInGrid(a, b);
   renderBoard();
@@ -166,6 +284,8 @@ async function attemptSwap(a, b) {
     // invalid swap; revert after a small delay
     await sleep(180);
     swapInGrid(a, b);
+    state.history.pop(); // discard snapshot for invalid move
+    playBeep("bad");
     state.selected = null;
     state.isResolving = false;
     renderBoard();
@@ -176,6 +296,7 @@ async function attemptSwap(a, b) {
   state.movesRemaining = Math.max(0, state.movesRemaining - 1);
   state.selected = null;
   updateHud();
+  playBeep("ok");
   await resolveMatchesCascade(matched);
 
   if (state.movesRemaining === 0) {
@@ -256,6 +377,7 @@ async function resolveMatchesCascade(initialMatched) {
     await sleep(120);
 
     matched = findAllMatches();
+    playBeep("clear");
   }
 
   statusEl.textContent = state.cascadeDepth > 1 ? `Cascade x${state.cascadeDepth}!` : "";
@@ -369,6 +491,10 @@ function resetGame() {
   state.selected = null;
   state.isResolving = false;
   statusEl.textContent = "";
+  state.hammerCount = HAMMER_STARTING_COUNT;
+  state.isHammerMode = false;
+  state.history = [];
+  boardEl.classList.remove('hammer-mode');
   generateInitialBoard();
   updateHud();
   renderBoard();
@@ -393,6 +519,112 @@ function wireUi() {
     statusEl.textContent = "";
     state.isResolving = false;
   });
+  // new control handlers
+  hintBtn.addEventListener('click', () => { showHint(); });
+  hammerBtn.addEventListener('click', () => {
+    if (state.isResolving) return;
+    if (state.hammerCount <= 0) return;
+    state.isHammerMode = !state.isHammerMode;
+    boardEl.classList.toggle('hammer-mode', state.isHammerMode);
+    statusEl.textContent = state.isHammerMode ? 'Hammer: tap a tile to break' : '';
+  });
+  undoBtn.addEventListener('click', () => {
+    const snapshot = popHistory();
+    if (!snapshot || state.isResolving) return;
+    state.grid = deepCloneGrid(snapshot.grid);
+    state.movesRemaining = snapshot.movesRemaining;
+    state.score = snapshot.score;
+    state.hammerCount = snapshot.hammerCount ?? state.hammerCount;
+    renderBoard();
+    updateHud();
+  });
+  soundBtn.addEventListener('click', () => {
+    state.soundOn = !state.soundOn;
+    if (state.soundOn) playBeep('ok');
+    updateHud();
+  });
+
+  // touch swipe
+  boardEl.addEventListener('touchstart', onTouchStart, { passive: true });
+  boardEl.addEventListener('touchmove', onTouchMove, { passive: true });
+  boardEl.addEventListener('touchend', onTouchEnd, { passive: true });
+}
+
+function findHintMove() {
+  // Return a pair of coordinates that forms a match if swapped, or null
+  for (let r = 0; r < BOARD_SIZE; r++) {
+    for (let c = 0; c < BOARD_SIZE; c++) {
+      const here = { row: r, col: c };
+      const neighbors = [
+        { row: r, col: c + 1 },
+        { row: r + 1, col: c },
+      ];
+      for (const n of neighbors) {
+        if (!inBounds(n.row, n.col)) continue;
+        swapInGrid(here, n);
+        const matched = findAllMatches();
+        swapInGrid(here, n);
+        if (matched.size > 0) return [here, n];
+      }
+    }
+  }
+  return null;
+}
+
+async function showHint() {
+  const move = findHintMove();
+  if (!move) {
+    statusEl.textContent = "No hints available";
+    await sleep(400);
+    statusEl.textContent = "";
+    return;
+  }
+  const [a, b] = move;
+  const aEl = findTileElement(a.row, a.col);
+  const bEl = findTileElement(b.row, b.col);
+  if (!aEl || !bEl) return;
+  aEl.classList.add("hint");
+  bEl.classList.add("hint");
+  await sleep(HINT_HIGHLIGHT_MS);
+  aEl.classList.remove("hint");
+  bEl.classList.remove("hint");
+}
+
+function onTouchStart(e) {
+  if (state.isResolving) return;
+  const target = e.target.closest('.tile');
+  if (!target) return;
+  const row = Number(target.dataset.row);
+  const col = Number(target.dataset.col);
+  const touch = e.touches[0];
+  state.touchStart = { row, col, x: touch.clientX, y: touch.clientY };
+}
+
+function onTouchMove(e) {
+  if (!state.touchStart || state.isResolving) return;
+  const touch = e.touches[0];
+  const dx = touch.clientX - state.touchStart.x;
+  const dy = touch.clientY - state.touchStart.y;
+  if (Math.abs(dx) < SWIPE_THRESHOLD_PX && Math.abs(dy) < SWIPE_THRESHOLD_PX) return;
+  let targetCell = null;
+  if (Math.abs(dx) > Math.abs(dy)) {
+    // horizontal
+    if (dx > 0) targetCell = { row: state.touchStart.row, col: state.touchStart.col + 1 };
+    else targetCell = { row: state.touchStart.row, col: state.touchStart.col - 1 };
+  } else {
+    // vertical
+    if (dy > 0) targetCell = { row: state.touchStart.row + 1, col: state.touchStart.col };
+    else targetCell = { row: state.touchStart.row - 1, col: state.touchStart.col };
+  }
+  if (targetCell && inBounds(targetCell.row, targetCell.col)) {
+    const from = { row: state.touchStart.row, col: state.touchStart.col };
+    state.touchStart = null;
+    attemptSwap(from, targetCell);
+  }
+}
+
+function onTouchEnd() {
+  state.touchStart = null;
 }
 
 // Boot
